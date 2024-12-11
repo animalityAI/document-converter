@@ -6,13 +6,73 @@ from pypdf import PdfReader
 from docx import Document
 import mammoth
 from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor
+from tqdm import tqdm
 from .utils.formatting import apply_formatting, create_style
 
 class DocumentConverter:
-    def __init__(self, input_path):
+    def __init__(self, input_path, output_dir=None):
         self.input_path = Path(input_path)
-        self.output_dir = self.input_path.parent / 'converted'
+        self.output_dir = Path(output_dir) if output_dir else self.input_path.parent / 'converted'
         os.makedirs(self.output_dir, exist_ok=True)
+
+    @staticmethod
+    def batch_convert(input_dir, output_format, output_dir=None, max_workers=4):
+        """
+        Convert all supported files in a directory.
+        """
+        input_dir = Path(input_dir)
+        if not output_dir:
+            output_dir = input_dir / 'converted'
+        
+        # Get all supported files
+        supported_extensions = {'.pdf', '.epub', '.docx', '.txt'}
+        files_to_convert = [
+            f for f in input_dir.rglob("*") 
+            if f.suffix.lower() in supported_extensions
+        ]
+        
+        if not files_to_convert:
+            print(f"No supported files found in {input_dir}")
+            return
+        
+        # Create progress bar
+        pbar = tqdm(total=len(files_to_convert), desc="Converting files")
+        
+        def convert_file(file_path):
+            try:
+                converter = DocumentConverter(file_path, output_dir)
+                if output_format == 'txt':
+                    converter.convert_to_txt()
+                elif output_format == 'epub':
+                    converter.convert_to_epub()
+                elif output_format == 'mobi':
+                    converter.convert_to_mobi()
+                pbar.update(1)
+                return None
+            except Exception as e:
+                return (file_path, str(e))
+        
+        # Convert files in parallel
+        failed_conversions = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = executor.map(convert_file, files_to_convert)
+            for result in results:
+                if result is not None:
+                    failed_conversions.append(result)
+        
+        pbar.close()
+        
+        # Report results
+        total = len(files_to_convert)
+        success = total - len(failed_conversions)
+        print(f"\nConversion complete!")
+        print(f"Successfully converted: {success}/{total} files")
+        
+        if failed_conversions:
+            print("\nFailed conversions:")
+            for file_path, error in failed_conversions:
+                print(f"- {file_path.name}: {error}")
 
     def convert_to_txt(self):
         content = self._extract_content()
@@ -84,40 +144,4 @@ class DocumentConverter:
         book = epub.read_epub(str(self.input_path))
         text = ""
         for item in book.get_items():
-            if item.get_type() == ebooklib.ITEM_DOCUMENT:
-                soup = BeautifulSoup(item.get_content(), 'html.parser')
-                text += soup.get_text() + "\n"
-        return text
-
-    def _extract_from_docx(self):
-        result = mammoth.convert_to_html(self.input_path)
-        soup = BeautifulSoup(result.value, 'html.parser')
-        return soup.get_text()
-
-    def _extract_from_txt(self):
-        with open(self.input_path, 'r', encoding='utf-8') as f:
-            return f.read()
-
-def main():
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='Convert documents between formats')
-    parser.add_argument('input_file', help='Path to input file')
-    parser.add_argument('--to', choices=['txt', 'epub', 'mobi'], 
-                      required=True, help='Output format')
-    
-    args = parser.parse_args()
-    
-    converter = DocumentConverter(args.input_file)
-    
-    if args.to == 'txt':
-        output_path = converter.convert_to_txt()
-    elif args.to == 'epub':
-        output_path = converter.convert_to_epub()
-    elif args.to == 'mobi':
-        output_path = converter.convert_to_mobi()
-        
-    print(f"Converted file saved to: {output_path}")
-
-if __name__ == "__main__":
-    main()
+            if item.

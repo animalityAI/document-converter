@@ -14,7 +14,6 @@ import concurrent.futures
 import uuid
 import logging
 
-# Set up logging
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -24,7 +23,52 @@ class DocumentConverter:
         self.output_dir = self.input_path.parent / 'converted'
         os.makedirs(self.output_dir, exist_ok=True)
         logging.info(f"Initializing converter for {input_path}")
-        logging.info(f"Output directory: {self.output_dir}")
+
+    def _extract_content(self):
+        suffix = self.input_path.suffix.lower()
+        logging.info(f"Extracting content from {suffix} file")
+        
+        if suffix == '.pdf':
+            return self._extract_from_pdf()
+        elif suffix == '.epub':
+            return self._extract_from_epub()
+        elif suffix == '.docx':
+            return self._extract_from_docx()
+        elif suffix == '.txt':
+            return self._extract_from_txt()
+        else:
+            raise ValueError(f"Unsupported file format: {suffix}")
+
+    def _extract_from_pdf(self):
+        reader = PdfReader(self.input_path)
+        text = []
+        
+        for page in reader.pages:
+            content = page.extract_text()
+            content = content.replace('\x0c', '\n\n')
+            content = content.replace('\r\n', '\n')
+            content = '\n'.join(line.strip() for line in content.split('\n'))
+            text.append(content)
+
+        return '\n\n'.join(text)
+
+    def _extract_from_epub(self):
+        book = epub.read_epub(str(self.input_path))
+        text = []
+        for item in book.get_items():
+            if item.get_type() == ebooklib.ITEM_DOCUMENT:
+                soup = BeautifulSoup(item.get_content(), 'html.parser')
+                text.append(soup.get_text())
+        return '\n\n'.join(text)
+
+    def _extract_from_docx(self):
+        result = mammoth.convert_to_html(self.input_path)
+        soup = BeautifulSoup(result.value, 'html.parser')
+        return soup.get_text()
+
+    def _extract_from_txt(self):
+        with open(self.input_path, 'r', encoding='utf-8') as f:
+            return f.read()
 
     def convert_to_epub(self):
         try:
@@ -34,17 +78,14 @@ class DocumentConverter:
             if not content.strip():
                 raise ValueError(f"No content extracted from {self.input_path}")
             
-            logging.info("Creating EPUB book")
             book = epub.EpubBook()
             book.set_identifier(str(uuid.uuid4()))
             book.set_title(self.input_path.stem)
             book.set_language('en')
             
-            logging.info("Adding metadata")
             book.add_metadata('DC', 'description', f'Converted from {self.input_path.name}')
             book.add_metadata('DC', 'creator', 'Document Converter')
             
-            logging.info("Adding CSS")
             style = create_style()
             nav_css = epub.EpubItem(
                 uid="style_nav",
@@ -54,13 +95,10 @@ class DocumentConverter:
             )
             book.add_item(nav_css)
 
-            logging.info("Processing content")
             chunks = self._split_into_chapters(content)
-            logging.info(f"Created {len(chunks)} chapters")
-            
             chapters = []
+            
             for i, chunk in enumerate(chunks, 1):
-                logging.info(f"Processing chapter {i}")
                 c = epub.EpubHtml(
                     title=f'Chapter {i}',
                     file_name=f'chapter_{i:02d}.xhtml',
@@ -71,7 +109,6 @@ class DocumentConverter:
                 book.add_item(c)
                 chapters.append(c)
 
-            logging.info("Adding navigation")
             book.toc = [(epub.Section(f'Chapter {i+1}'), [c]) for i, c in enumerate(chapters)]
             book.add_item(epub.EpubNcx())
             book.add_item(epub.EpubNav())
@@ -87,6 +124,41 @@ class DocumentConverter:
         except Exception as e:
             logging.error(f"Error converting {self.input_path}: {str(e)}")
             raise
+
+    def _create_chapter_html(self, content):
+        return f'''
+        <?xml version="1.0" encoding="UTF-8"?>
+        <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+        <head>
+            <title>{self.input_path.stem}</title>
+            <link rel="stylesheet" type="text/css" href="style/nav.css"/>
+        </head>
+        <body>
+            {content}
+        </body>
+        </html>
+        '''
+
+    def _split_into_chapters(self, content):
+        MAX_CHUNK_SIZE = 50000
+        paragraphs = content.split('\n\n')
+        chunks = []
+        current_chunk = []
+        current_size = 0
+
+        for para in paragraphs:
+            para_size = len(para)
+            if current_size + para_size > MAX_CHUNK_SIZE and current_chunk:
+                chunks.append('\n\n'.join(current_chunk))
+                current_chunk = []
+                current_size = 0
+            current_chunk.append(para)
+            current_size += para_size
+
+        if current_chunk:
+            chunks.append('\n\n'.join(current_chunk))
+
+        return chunks if chunks else [content]
 
 def convert_file(input_file, output_format):
     try:
